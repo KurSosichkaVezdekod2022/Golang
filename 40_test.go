@@ -6,14 +6,17 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
 
+const timeEps = time.Millisecond * 10
+
 func add(serverURL, sync, duration string, t *testing.T) time.Duration {
 	postBody, _ := json.Marshal(map[string]string{
-		"name":  "Toby",
-		"email": "Toby@example.com",
+		sync:           "true",
+		"timeDuration": duration,
 	})
 	responseBody := bytes.NewBuffer(postBody)
 
@@ -32,7 +35,7 @@ func getBodyByURL(url string, t *testing.T) string {
 	}
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		t.Fatalln(err)
+		t.Fatal(err)
 	}
 	return string(body)
 }
@@ -50,5 +53,45 @@ func getTime(serverURL string, t *testing.T) time.Duration {
 	return duration
 }
 
+func abs(t time.Duration) time.Duration {
+	if t < 0 {
+		return -t
+	}
+	return t
+}
+
+func evaluateGetTime(t *testing.T, serverURL string, trueAns time.Duration) {
+	ans := getTime(serverURL, t)
+	if abs(ans-trueAns) > timeEps {
+		t.Fatal("Incorrect answer: ", ans, " != ", trueAns)
+	}
+}
+
+func evaluateGetSchedule(t *testing.T, serverURL, trueAns string) {
+	ans := getSchedule(serverURL, t)
+	if strings.TrimSpace(ans) != trueAns {
+		t.Fatal("Incorrect answer: ", ans, " != ", trueAns)
+	}
+}
+
+func evaluateAdd(t *testing.T, serverURL, sync, duration string, trueRequestDuration time.Duration) {
+	requestDuration := add(serverURL, sync, duration, t)
+	if abs(requestDuration-trueRequestDuration) > timeEps {
+		t.Fatal("Incorrect request duration: ", requestDuration, " != ", trueRequestDuration)
+	}
+}
+
 func Test1(t *testing.T) {
+	serverURL := "http://localhost:8080"
+	evaluateAdd(t, serverURL, "sync", "1s", time.Second)
+	go evaluateAdd(t, serverURL, "sync", "2s", time.Second*2)
+	time.Sleep(time.Millisecond)
+	go evaluateAdd(t, serverURL, "sync", "3s", time.Second*5)
+	time.Sleep(time.Millisecond)
+	go evaluateAdd(t, serverURL, "async", "2s", 0)
+	time.Sleep(time.Millisecond)
+	go evaluateGetSchedule(t, serverURL, "[\"2s\",\"3s\",\"2s\"]")
+	time.Sleep(time.Millisecond)
+	go evaluateGetTime(t, serverURL, time.Second*7)
+	time.Sleep(time.Second * 10)
 }
