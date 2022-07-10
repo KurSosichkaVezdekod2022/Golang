@@ -2,18 +2,15 @@ package main
 
 import (
 	"bufio"
+	"encoding/binary"
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math"
 	"os"
 	"strconv"
 	"strings"
 )
-
-type protobuf interface {
-	decode(reader *bufio.Reader, bytesLeft int) bool
-	filled() bool
-}
 
 type Field struct {
 	CountRequirement string // repeated | required | optional
@@ -34,12 +31,12 @@ var messages map[string]Message
 
 const MAX_BYTES = int(1e9)
 
-func getVarInt(reader *bufio.Reader) (int64, int, error) {
+func getVarInt(reader *bufio.Reader) (int64, int) {
 	bytes := []byte{}
 	for {
 		curByte, err := reader.ReadByte()
 		if err != nil {
-			return -1, 0, err
+			return -1, 0
 		}
 		bytes = append(bytes, curByte&((1<<7)-1))
 		if curByte&(1<<7) == 0 {
@@ -53,49 +50,49 @@ func getVarInt(reader *bufio.Reader) (int64, int, error) {
 	for _, b := range bytes {
 		res = (res << 7) | int64(b)
 	}
-	return res, len(bytes), nil
+	return res, len(bytes)
 }
 
-func get64bit(reader *bufio.Reader) (int64, int, error) {
-	var n int64 = 0
+func get64bit(reader *bufio.Reader) (float64, int) {
+	bytes := []byte{}
 	for i := 0; i < 8; i++ {
 		curByte, err := reader.ReadByte()
 		if err != nil {
-			return -1, 0, err
+			return -1, 0
 		}
-		n = (n << 8) | int64(curByte)
+		bytes = append(bytes, curByte)
 	}
-
-	return (n >> 1) ^ (n << 63), 8, nil
+	bits := binary.LittleEndian.Uint64(bytes)
+	return math.Float64frombits(bits), 8
 }
 
-func getLengthDelimited(reader *bufio.Reader) (string, int, error) {
+func getLengthDelimited(reader *bufio.Reader) (string, int) {
 	length, err := reader.ReadByte()
 	result := []byte{}
 	if err != nil {
-		return "", 0, err
+		return "", 0
 	}
 	for i := 0; i < int(length); i++ {
 		curByte, err := reader.ReadByte()
 		if err != nil {
-			return "", 0, err
+			return "", 0
 		}
 		result = append(result, curByte)
 	}
-	return string(result), int(length) + 1, nil
+	return string(result), int(length) + 1
 }
 
-func get32bit(reader *bufio.Reader) (int32, int, error) {
-	var n int32 = 0
+func get32bit(reader *bufio.Reader) (float32, int) {
+	bytes := []byte{}
 	for i := 0; i < 4; i++ {
 		curByte, err := reader.ReadByte()
 		if err != nil {
-			return -1, 0, err
+			return -1, 0
 		}
-		n = (n << 8) | int32(curByte)
+		bytes = append(bytes, curByte)
 	}
-
-	return (n >> 1) ^ (n << 31), 4, nil
+	bits := binary.LittleEndian.Uint32(bytes)
+	return math.Float32frombits(bits), 4
 }
 
 func (m *Message) decode(reader *bufio.Reader, bytesLeft int) bool {
@@ -107,9 +104,9 @@ func (m *Message) decode(reader *bufio.Reader, bytesLeft int) bool {
 		if bytesLeft == 0 || err != nil {
 			return m.filled() // EOF
 		}
-		tag, len, err := getVarInt(reader)
+		tag, len := getVarInt(reader)
 		bytesLeft -= len
-		if err != nil {
+		if len == 0 {
 			return false
 		}
 		field_number := tag >> 3
@@ -135,14 +132,10 @@ func (m *Message) decode(reader *bufio.Reader, bytesLeft int) bool {
 }
 
 func copyField(field *Field) *Field {
-	return &Field{
-		CountRequirement: field.CountRequirement,
-		Type:             field.Type,
-		GlobalType:       "",
-		Name:             field.Name,
-		Messages:         []Message{},
-		Values:           make([]interface{}, 0),
-	}
+	copy := *field
+	copy.Messages = []Message{}
+	copy.Values = make([]interface{}, 0)
+	return &copy
 }
 
 func copyMessage(message Message) Message {
@@ -161,13 +154,13 @@ func (f *Field) decode(reader *bufio.Reader, bytesLeft int) int {
 	var len int
 	switch f.GlobalType {
 	case "Varint":
-		val, len, _ = getVarInt(reader)
+		val, len = getVarInt(reader)
 	case "64-bit":
-		val, len, _ = get64bit(reader)
+		val, len = get64bit(reader)
 	case "Length-delimited":
-		val, len, _ = getLengthDelimited(reader)
+		val, len = getLengthDelimited(reader)
 	case "32-bit":
-		val, len, _ = get32bit(reader)
+		val, len = get32bit(reader)
 	default:
 		message := copyMessage(messages[f.Type])
 		lenB, err := reader.ReadByte()
@@ -258,7 +251,7 @@ func readImport(scanner *bufio.Scanner, baseDir string) {
 	if err != nil {
 		log.Fatal("could not open file ", err, " ", baseDir+file)
 	}
-	readFile(bufio.NewScanner(f), "proto/")
+	readFile(bufio.NewScanner(f), baseDir)
 }
 
 func readFile(scanner *bufio.Scanner, baseDir string) *Message {
@@ -291,7 +284,7 @@ func test(protoFile, binFile string) bool {
 	if err != nil {
 		log.Fatal("could not open file ", protoFile)
 	}
-	message := readFile(bufio.NewScanner(f), "proto/")
+	message := readFile(bufio.NewScanner(f), "50/proto/")
 
 	f, err = os.Open(binFile)
 	if err != nil {
@@ -359,11 +352,11 @@ func init() {
 }
 
 func main() {
-	protos := getAllFilesInDir("proto/")
-	pbs := getAllFilesInDir("pb/")
+	protos := getAllFilesInDir("50/proto/")
+	pbs := getAllFilesInDir("50/pb/")
 	for _, proto := range protos {
 		for _, pb := range pbs {
-			test("proto/"+proto, "pb/"+pb)
+			test("50/proto/"+proto, "50/pb/"+pb)
 		}
 	}
 }
