@@ -19,7 +19,7 @@ var guard chan bool
 var lastStart time.Time
 var taskChannel chan Task
 
-const MAX_TASKS = 10000
+const MAX_TASKS = 100000
 
 func runTasks() {
 	for {
@@ -109,14 +109,13 @@ func handleTime(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(totalTime.String()))
 }
 
-func initialize() {
+func init() {
 	guard = make(chan bool)
 	taskChannel = make(chan Task, MAX_TASKS)
 	go runTasks()
 }
 
 func main() {
-	initialize()
 	http.HandleFunc("/add", handleAdd)
 	http.HandleFunc("/schedule", handleSchedule)
 	http.HandleFunc("/time", handleTime)
