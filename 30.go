@@ -30,14 +30,6 @@ func getDurations(filePath string) []time.Duration {
 	return durations
 }
 
-func doTasks(durations []time.Duration) {
-	for i, duration := range durations {
-		log.Print("starting task ", i)
-		time.Sleep(duration)
-		log.Print("task ", i, " completed")
-	}
-}
-
 func doTasksParallel(durations []time.Duration) {
 	var waitGroup sync.WaitGroup
 	waitGroup.Add(len(durations))
