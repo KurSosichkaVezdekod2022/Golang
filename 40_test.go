@@ -60,9 +60,9 @@ func abs(t time.Duration) time.Duration {
 	return t
 }
 
-func evaluateGetTime(t *testing.T, serverURL string, trueAns time.Duration) {
+func evaluateGetTime(t *testing.T, serverURL string, trueAns, maxDifference time.Duration) {
 	ans := getTime(serverURL, t)
-	if abs(ans-trueAns) > timeEps {
+	if abs(ans-trueAns) > maxDifference {
 		t.Fatal("Incorrect answer: ", ans, " != ", trueAns)
 	}
 }
@@ -92,6 +92,28 @@ func Test1(t *testing.T) {
 	time.Sleep(time.Millisecond)
 	go evaluateGetSchedule(t, serverURL, "[\"2s\",\"3s\",\"2s\"]")
 	time.Sleep(time.Millisecond)
-	go evaluateGetTime(t, serverURL, time.Second*7)
-	time.Sleep(time.Second * 10)
+	go evaluateGetTime(t, serverURL, time.Second*7, timeEps)
+	time.Sleep(time.Second * 8)
+}
+
+func Test2(t *testing.T) {
+	serverURL := "http://localhost:8080"
+	go evaluateGetSchedule(t, serverURL, "[]")
+	time.Sleep(time.Millisecond)
+	go evaluateAdd(t, serverURL, "async", "400ms", 0)
+	go evaluateAdd(t, serverURL, "async", "0.4s", 0)
+	time.Sleep(time.Millisecond)
+	go evaluateAdd(t, serverURL, "sync", "0.5s", time.Millisecond*1300)
+	time.Sleep(time.Millisecond)
+	go evaluateGetSchedule(t, serverURL, "[\"400ms\",\"400ms\",\"500ms\"]")
+	time.Sleep(time.Second * 2)
+}
+
+func TestMany(t *testing.T) {
+	serverURL := "http://localhost:8080"
+	for i := 0; i < 100; i++ {
+		go evaluateAdd(t, serverURL, "async", "5s", 0)
+		time.Sleep(time.Millisecond)
+	}
+	evaluateGetTime(t, serverURL, time.Second*500+1, time.Second*3)
 }
