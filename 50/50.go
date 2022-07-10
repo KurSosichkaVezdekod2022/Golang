@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
 	"strconv"
@@ -10,7 +11,7 @@ import (
 )
 
 type protobuf interface {
-	decode(reader *bufio.Reader) bool
+	decode(reader *bufio.Reader, bytesLeft int) bool
 	filled() bool
 }
 
@@ -19,21 +20,24 @@ type protobuf interface {
 type Field struct {
 	CountRequirement string // repeated | required | optional
 	Type             string
+	GlobalType       string
 	Name             string
 	Values           []interface{}
 }
 
 type Message struct {
 	Name   string
-	Fields map[int]protobuf
+	Fields map[int]*Field
 }
 
-func getVarInt(reader *bufio.Reader) (int64, error) {
+var messages map[string]Message
+
+func getVarInt(reader *bufio.Reader) (int64, int, error) {
 	bytes := []byte{}
 	for {
 		curByte, err := reader.ReadByte()
 		if err != nil {
-			return -1, err
+			return -1, 0, err
 		}
 		bytes = append(bytes, curByte&((1<<7)-1))
 		if curByte&(1<<7) == 0 {
@@ -47,83 +51,110 @@ func getVarInt(reader *bufio.Reader) (int64, error) {
 	for _, b := range bytes {
 		res = (res << 7) | int64(b)
 	}
-	return res, nil
+	return res, len(bytes), nil
 }
 
-func get64bit(reader *bufio.Reader) (int64, error) {
+func get64bit(reader *bufio.Reader) (int64, int, error) {
 	var n int64 = 0
 	for i := 0; i < 8; i++ {
 		curByte, err := reader.ReadByte()
 		if err != nil {
-			return -1, err
+			return -1, 0, err
 		}
 		n = (n << 8) | int64(curByte)
 	}
 
-	return (n >> 1) ^ (n << 63), nil
+	return (n >> 1) ^ (n << 63), 8, nil
 }
 
-func getLengthDelimited(reader *bufio.Reader) ([]byte, error) {
+func getLengthDelimited(reader *bufio.Reader) ([]byte, int, error) {
 	length, err := reader.ReadByte()
 	result := []byte{}
 	if err != nil {
-		return result, err
+		return result, 0, err
 	}
 	for i := 0; i < int(length); i++ {
 		curByte, err := reader.ReadByte()
 		if err != nil {
-			return result, err
+			return result, 0, err
 		}
 		result = append(result, curByte)
 	}
-	return result, nil
+	return result, int(length), nil
 }
 
-func get32bit(reader *bufio.Reader) (int32, error) {
+func get32bit(reader *bufio.Reader) (int32, int, error) {
 	var n int32 = 0
 	for i := 0; i < 4; i++ {
 		curByte, err := reader.ReadByte()
 		if err != nil {
-			return -1, err
+			return -1, 0, err
 		}
 		n = (n << 8) | int32(curByte)
 	}
 
-	return (n >> 1) ^ (n << 31), nil
+	return (n >> 1) ^ (n << 31), 4, nil
 }
 
-func (m *Message) decode(reader *bufio.Reader) bool {
+func (m *Message) decode(reader *bufio.Reader, bytesLeft int) bool {
 	for {
-		tag, err := getVarInt(reader)
+		_, err := reader.Peek(1)
+		if bytesLeft < 0 {
+			return false
+		}
+		if bytesLeft == 0 || err != nil {
+			return m.filled() // EOF
+		}
+		tag, len, err := getVarInt(reader)
+		bytesLeft -= len
 		if err != nil {
-			log.Fatal(err)
+			return false
 		}
 		field_number := tag >> 3
+		globalType := tag & 7
+		types := []string{"Varint", "64-bit", "Length-delimited", "Start group", "End group", "32-bit"}
 		if _, exists := m.Fields[int(field_number)]; !exists {
 			return false
 		}
-		if !m.Fields[int(field_number)].decode(reader) {
+		if _, exists := messages[m.Fields[int(field_number)].Type]; !exists {
+			m.Fields[int(field_number)].GlobalType = types[globalType]
+		}
+		bytesRead := m.Fields[int(field_number)].decode(reader, 10000)
+		if bytesRead == 0 {
 			return false
 		}
+		bytesLeft -= bytesRead
 	}
-	return true
 }
 
-func (f *Field) decode(reader *bufio.Reader) bool {
-	var err error
+func (f *Field) decode(reader *bufio.Reader, bytesLeft int) int {
 	var val interface{}
-	switch f.Type {
+	var len int
+	switch f.GlobalType {
 	case "Varint":
-		val, err = getVarInt(reader)
+		val, len, _ = getVarInt(reader)
 	case "64-bit":
-		val, err = get64bit(reader)
+		val, len, _ = get64bit(reader)
 	case "Length-delimited":
-		val, err = getLengthDelimited(reader)
+		val, len, _ = getLengthDelimited(reader)
 	case "32-bit":
-		val, err = get32bit(reader)
+		val, len, _ = get32bit(reader)
+	default:
+		message := messages[f.Type]
+		len, err := reader.ReadByte()
+		if err != nil {
+			return 0
+		}
+		if !message.decode(reader, int(len)) {
+			return 0
+		}
+		val, err = message, nil
 	}
 	f.Values = append(f.Values, val)
-	return err != nil
+	if len > bytesLeft {
+		return 0
+	}
+	return len
 }
 
 func (m *Message) filled() bool {
@@ -162,7 +193,6 @@ func readFieldFromFile(scanner *bufio.Scanner) (*Field, int) {
 	}
 	field_number := tokens[4]
 	field_number = field_number[:len(field_number)-1]
-	log.Print(field_number)
 	field_number_int, err := strconv.Atoi(field_number)
 	if err != nil {
 		log.Fatal("could not read field_number ", scanner.Text())
@@ -171,11 +201,11 @@ func readFieldFromFile(scanner *bufio.Scanner) (*Field, int) {
 }
 
 func readMessageFromFile(scanner *bufio.Scanner) *Message {
-	text := scanner.Text()
+	text := strings.TrimSpace(scanner.Text())
 	name := strings.Split(text, " ")[1]
 	message := Message{
 		Name:   name,
-		Fields: make(map[int]protobuf),
+		Fields: make(map[int]*Field),
 	}
 
 	scanner.Scan() // {
@@ -189,42 +219,79 @@ func readMessageFromFile(scanner *bufio.Scanner) *Message {
 	return &message
 }
 
-func readFile(scanner *bufio.Scanner) *Message {
+func readImport(scanner *bufio.Scanner, baseDir string) {
+	text := strings.TrimSpace(scanner.Text())
+	tokens := strings.Split(text, " ")
+	file := strings.Trim(tokens[1], "\";")
+	f, err := os.Open(baseDir + file)
+	if err != nil {
+		log.Fatal("could not open file ", err, " ", baseDir+file)
+	}
+	readFile(bufio.NewScanner(f), "proto/")
+}
+
+func readFile(scanner *bufio.Scanner, baseDir string) *Message {
 	if !scanner.Scan() {
 		log.Fatal("no proto syntax found")
 	}
-	messages := []*Message{}
+	messageList := []*Message{}
 	for scanner.Scan() {
 		text := scanner.Text()
 		if text == "" {
 			continue
 		}
 		if strings.HasPrefix(text, "import") {
-
+			readImport(scanner, baseDir)
 		} else if strings.HasPrefix(text, "message") {
-			messages = append(messages, readMessageFromFile(scanner))
+			message := readMessageFromFile(scanner)
+			messageList = append(messageList, message)
+			messages[message.Name] = *message
 		} else {
 			log.Fatal("error occured while parsing proto file (unkown line type)")
 		}
 	}
-	return messages[0]
+	return messageList[len(messageList)-1]
 }
 
-func main() {
-	filePath := "50/proto/teams.proto"
-	binPath := "50/pb/example4.pb"
-	fmt.Scanf("%s %s", &filePath, &binPath)
+func test(protoFile, binFile string) bool {
+	filePath := protoFile
+	binPath := binFile
+	messages = make(map[string]Message)
 
 	f, err := os.Open(filePath)
 	if err != nil {
-		log.Fatal("could not ope file")
+		log.Fatal("could not open file ", filePath)
 	}
-	message := readFile(bufio.NewScanner(f))
-	log.Print(message)
+	message := readFile(bufio.NewScanner(f), "proto/")
 
 	f, err = os.Open(binPath)
 	if err != nil {
 		log.Fatal("could not open bin file", err)
 	}
-	log.Print(message.decode(bufio.NewReader(f)))
+	return message.decode(bufio.NewReader(f), 100000)
+}
+
+func getAllFilesInDir(dir string) []string {
+	fileNames := []string{}
+	files, err := ioutil.ReadDir(dir)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for _, f := range files {
+		fileNames = append(fileNames, f.Name())
+	}
+	return fileNames
+}
+
+func main() {
+	protos := getAllFilesInDir("proto/")
+	pbs := getAllFilesInDir("pb/")
+	for _, proto := range protos {
+		for _, pb := range pbs {
+			if test("proto/"+proto, "pb/"+pb) {
+				fmt.Println(proto, pb)
+			}
+		}
+	}
 }
