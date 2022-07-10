@@ -285,21 +285,20 @@ func readFile(scanner *bufio.Scanner, baseDir string) *Message {
 }
 
 func test(protoFile, binFile string) bool {
-	filePath := protoFile
-	binPath := binFile
 	messages = make(map[string]Message)
 
-	f, err := os.Open(filePath)
+	f, err := os.Open(protoFile)
 	if err != nil {
-		log.Fatal("could not open file ", filePath)
+		log.Fatal("could not open file ", protoFile)
 	}
 	message := readFile(bufio.NewScanner(f), "proto/")
 
-	f, err = os.Open(binPath)
+	f, err = os.Open(binFile)
 	if err != nil {
 		log.Fatal("could not open bin file", err)
 	}
 	if message.decode(bufio.NewReader(f), MAX_BYTES) {
+		fmt.Println(protoFile, binFile)
 		message.printFields()
 		return true
 	}
@@ -364,9 +363,7 @@ func main() {
 	pbs := getAllFilesInDir("pb/")
 	for _, proto := range protos {
 		for _, pb := range pbs {
-			if test("proto/"+proto, "pb/"+pb) {
-				fmt.Println(proto, pb)
-			}
+			test("proto/"+proto, "pb/"+pb)
 		}
 	}
 }
