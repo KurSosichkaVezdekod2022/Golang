@@ -15,14 +15,13 @@ type protobuf interface {
 	filled() bool
 }
 
-// Varint | 64-bit | Length-delimited | Start group | End group | 32-bit
-
 type Field struct {
 	CountRequirement string // repeated | required | optional
 	Type             string
 	GlobalType       string
 	Name             string
 	Values           []interface{}
+	Messages         []Message
 }
 
 type Message struct {
@@ -30,7 +29,10 @@ type Message struct {
 	Fields map[int]*Field
 }
 
+var TypeDict map[string]string
 var messages map[string]Message
+
+const MAX_BYTES = int(1e9)
 
 func getVarInt(reader *bufio.Reader) (int64, int, error) {
 	bytes := []byte{}
@@ -67,20 +69,20 @@ func get64bit(reader *bufio.Reader) (int64, int, error) {
 	return (n >> 1) ^ (n << 63), 8, nil
 }
 
-func getLengthDelimited(reader *bufio.Reader) ([]byte, int, error) {
+func getLengthDelimited(reader *bufio.Reader) (string, int, error) {
 	length, err := reader.ReadByte()
 	result := []byte{}
 	if err != nil {
-		return result, 0, err
+		return "", 0, err
 	}
 	for i := 0; i < int(length); i++ {
 		curByte, err := reader.ReadByte()
 		if err != nil {
-			return result, 0, err
+			return "", 0, err
 		}
 		result = append(result, curByte)
 	}
-	return result, int(length), nil
+	return string(result), int(length) + 1, nil
 }
 
 func get32bit(reader *bufio.Reader) (int32, int, error) {
@@ -117,14 +119,41 @@ func (m *Message) decode(reader *bufio.Reader, bytesLeft int) bool {
 			return false
 		}
 		if _, exists := messages[m.Fields[int(field_number)].Type]; !exists {
+			if types[globalType] != TypeDict[m.Fields[int(field_number)].Type] {
+				return false
+			}
 			m.Fields[int(field_number)].GlobalType = types[globalType]
+		} else if globalType != 2 {
+			return false // must be Length-delimited
 		}
-		bytesRead := m.Fields[int(field_number)].decode(reader, 10000)
+		bytesRead := m.Fields[int(field_number)].decode(reader, bytesLeft)
 		if bytesRead == 0 {
 			return false
 		}
 		bytesLeft -= bytesRead
 	}
+}
+
+func copyField(field *Field) *Field {
+	return &Field{
+		CountRequirement: field.CountRequirement,
+		Type:             field.Type,
+		GlobalType:       "",
+		Name:             field.Name,
+		Messages:         []Message{},
+		Values:           make([]interface{}, 0),
+	}
+}
+
+func copyMessage(message Message) Message {
+	res := Message{
+		Name:   message.Name,
+		Fields: make(map[int]*Field),
+	}
+	for key, field := range message.Fields {
+		res.Fields[key] = copyField(field)
+	}
+	return res
 }
 
 func (f *Field) decode(reader *bufio.Reader, bytesLeft int) int {
@@ -140,15 +169,17 @@ func (f *Field) decode(reader *bufio.Reader, bytesLeft int) int {
 	case "32-bit":
 		val, len, _ = get32bit(reader)
 	default:
-		message := messages[f.Type]
-		len, err := reader.ReadByte()
+		message := copyMessage(messages[f.Type])
+		lenB, err := reader.ReadByte()
+		len = int(lenB) + 1
 		if err != nil {
 			return 0
 		}
-		if !message.decode(reader, int(len)) {
+		if !message.decode(reader, len-1) {
 			return 0
 		}
 		val, err = message, nil
+		f.Messages = append(f.Messages, message)
 	}
 	f.Values = append(f.Values, val)
 	if len > bytesLeft {
@@ -268,7 +299,29 @@ func test(protoFile, binFile string) bool {
 	if err != nil {
 		log.Fatal("could not open bin file", err)
 	}
-	return message.decode(bufio.NewReader(f), 100000)
+	if message.decode(bufio.NewReader(f), MAX_BYTES) {
+		message.printFields()
+		return true
+	}
+	return false
+}
+
+func (f *Field) print() {
+	if _, exists := messages[f.Type]; exists {
+		for _, message := range f.Messages {
+			message.printFields()
+		}
+	} else {
+		for _, val := range f.Values {
+			fmt.Println(f.Name, ":", val)
+		}
+	}
+}
+
+func (m Message) printFields() {
+	for _, field := range m.Fields {
+		field.print()
+	}
 }
 
 func getAllFilesInDir(dir string) []string {
@@ -282,6 +335,28 @@ func getAllFilesInDir(dir string) []string {
 		fileNames = append(fileNames, f.Name())
 	}
 	return fileNames
+}
+
+func init() {
+	TypeDict = map[string]string{
+		"string":   "Length-delimited",
+		"bytes":    "Length-delimited",
+		"int64":    "64-bit",
+		"int":      "Varint",
+		"int32":    "Varint",
+		"uint32":   "Varint",
+		"uint64":   "Varint",
+		"sint32":   "Varint",
+		"sint64":   "Varint",
+		"bool":     "Varint",
+		"enum":     "Varint",
+		"fixed64":  "64-bit",
+		"sfixed64": "64-bit",
+		"double":   "64-bit",
+		"fixed32":  "32-bit",
+		"sfixed32": "32-bit",
+		"float":    "32-bit",
+	}
 }
 
 func main() {
